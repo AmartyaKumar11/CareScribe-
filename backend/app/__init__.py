@@ -1,0 +1,2 @@
+# CareScribe Backend Application
+
