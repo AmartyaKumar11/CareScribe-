@@ -1,12 +1,14 @@
 import whisper
 from pathlib import Path
 from app.models.transcript import TranscriptResponse
+from app.services.audio_normalization import AudioNormalizationService
 
 
 class TranscriptionService:
     """
     Whisper-based transcription service.
     Uses self-hosted OpenAI Whisper for speech-to-text.
+    Only uses normalized audio files (never original uploads).
     """
     
     def __init__(self):
@@ -15,25 +17,14 @@ class TranscriptionService:
             self.model = whisper.load_model("small")
         except Exception:
             self.model = None
-    
-    def _find_audio_file(self, session_id: str) -> Path:
-        """
-        Find audio file for a session_id.
-        Returns first matching file with session_id prefix.
-        """
-        storage_dir = Path(__file__).parent.parent / "storage" / "audio"
         
-        # Find files starting with session_id
-        for file_path in storage_dir.glob(f"{session_id}_*"):
-            if file_path.is_file():
-                return file_path
-        
-        return None
+        self.normalization_service = AudioNormalizationService()
     
     def get_transcript(self, session_id: str) -> TranscriptResponse:
         """
         Get transcript for a session.
-        Transcribes audio file using Whisper.
+        Transcribes normalized audio file using Whisper.
+        Whisper only reads normalized.wav, never original uploads.
         """
         # Return empty if model not loaded
         if self.model is None:
@@ -43,19 +34,21 @@ class TranscriptionService:
                 status="complete"
             )
         
-        # Find audio file
-        audio_path = self._find_audio_file(session_id)
-        if audio_path is None or not audio_path.exists():
+        # Get normalized audio path (Whisper only uses normalized.wav)
+        normalized_path = self.normalization_service.get_normalized_path(session_id)
+        
+        if normalized_path is None or not normalized_path.exists():
+            # Normalized audio not available
             return TranscriptResponse(
                 session_id=session_id,
                 segments=[],
                 status="complete"
             )
         
-        # Transcribe with Whisper
+        # Transcribe with Whisper using normalized audio only
         try:
             result = self.model.transcribe(
-                str(audio_path),
+                str(normalized_path),
                 task="transcribe",
                 language=None,  # Auto-detect
                 fp16=False

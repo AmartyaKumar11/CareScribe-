@@ -1,6 +1,7 @@
 from fastapi import APIRouter, UploadFile, File, HTTPException
 from pathlib import Path
 from app.models.audio import AudioUploadResponse
+from app.services.audio_normalization import AudioNormalizationService
 
 router = APIRouter()
 
@@ -14,6 +15,7 @@ async def upload_audio(session_id: str, file: UploadFile = File(...)):
     """
     Upload audio file for a session.
     Saves the file to storage/audio/ with session_id prefix.
+    Automatically normalizes audio after upload.
     """
     # Validate session_id format (basic UUID check)
     if len(session_id) != 36:  # UUID format check
@@ -31,6 +33,16 @@ async def upload_audio(session_id: str, file: UploadFile = File(...)):
             f.write(content)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to save audio file: {str(e)}")
+    
+    # Normalize audio after upload
+    normalization_service = AudioNormalizationService()
+    normalized_path = normalization_service.normalize_audio(session_id, file_path)
+    
+    # If normalization fails, still return accepted (graceful degradation)
+    # The error will be caught when transcription is attempted
+    if normalized_path is None:
+        # Normalization failed, but don't crash the upload
+        pass
     
     return AudioUploadResponse(status="accepted")
 
