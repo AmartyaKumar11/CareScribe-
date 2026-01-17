@@ -28,8 +28,9 @@ class VoiceActivityDetectionService:
     # Minimum voicing density ratio (voiced_frames / total_frames)
     MIN_VOICING_DENSITY = 0.6
     
-    # Minimum relative energy variance (std/mean) for rejecting static/hiss noise
-    MIN_RELATIVE_ENERGY_VARIANCE = 0.05
+    # Minimum relative temporal RMS modulation for rejecting static/hiss noise
+    # modulation_mean / energy_mean must be >= this threshold
+    MIN_RELATIVE_RMS_MODULATION = 0.1
     EPSILON = 1e-6  # Small epsilon to avoid division by zero
     
     def __init__(self):
@@ -124,8 +125,8 @@ class VoiceActivityDetectionService:
             # 1. Minimum duration
             segments = self._filter_short_segments(segments)
             
-            # 2. Energy modulation rejection (relative variance)
-            segments = self._filter_low_energy_variance(segments, frame_energies)
+            # 2. Temporal RMS modulation rejection (reject static/hiss noise)
+            segments = self._filter_low_temporal_rms_modulation(segments, frame_energies)
             
             # 3. Voiced frame ratio
             segments = self._filter_low_voicing_density(segments, frame_decisions, frame_energies)
@@ -270,9 +271,16 @@ class VoiceActivityDetectionService:
             if len(segment_energies) >= 2:
                 energy_mean = np.mean(segment_energies)
                 energy_std = np.std(segment_energies)
+                # Compute temporal RMS modulation for debug
+                rms_array = np.array(segment_energies)
+                rms_deltas = np.abs(np.diff(rms_array))
+                modulation_mean = float(np.mean(rms_deltas))
+                relative_modulation = modulation_mean / (energy_mean + self.EPSILON)
             else:
                 energy_mean = 0.0
                 energy_std = 0.0
+                modulation_mean = 0.0
+                relative_modulation = 0.0
             
             # Segment-level debug print
             print(
@@ -284,6 +292,8 @@ class VoiceActivityDetectionService:
                 "voiced_ratio=", round(voicing_density, 3),
                 "energy_mean=", round(float(energy_mean), 6),
                 "energy_std=", round(float(energy_std), 6),
+                "modulation_mean=", round(float(modulation_mean), 6),
+                "relative_modulation=", round(float(relative_modulation), 6),
             )
             
             # Keep segment only if voicing density >= threshold
@@ -292,18 +302,18 @@ class VoiceActivityDetectionService:
         
         return filtered
     
-    def _filter_low_energy_variance(self, segments: List[Tuple[float, float]], frame_energies: List[Tuple[float, float]]) -> List[Tuple[float, float]]:
+    def _filter_low_temporal_rms_modulation(self, segments: List[Tuple[float, float]], frame_energies: List[Tuple[float, float]]) -> List[Tuple[float, float]]:
         """
-        Filter out segments with low relative energy variance (static/hiss noise rejection).
-        Uses relative variance (std/mean) to detect static noise vs dynamic speech.
-        Only segments where relative energy variance >= threshold are kept.
+        Filter out segments with low temporal RMS modulation (static/hiss noise rejection).
+        Analyzes frame-to-frame RMS changes to detect stationary noise vs dynamic speech.
+        Only segments with sufficient temporal modulation are kept.
         
         Args:
             segments: List of (start, end) segment tuples
-            frame_energies: List of (frame_time, rms_energy) tuples for ALL frames in segment
+            frame_energies: List of (frame_time, rms_energy) tuples for ALL frames
             
         Returns:
-            Filtered segments with sufficient energy modulation
+            Filtered segments with sufficient temporal RMS modulation
         """
         if not segments or not frame_energies:
             return segments
@@ -313,7 +323,7 @@ class VoiceActivityDetectionService:
         
         for segment_start, segment_end in segments:
             # Collect RMS energy values for ALL frames within this segment window
-            # Not just voiced frames - we need to analyze the entire segment
+            # Not just voiced frames - analyze the entire segment
             segment_energies = []
             
             for frame_time, rms_energy in frame_energies:
@@ -322,23 +332,26 @@ class VoiceActivityDetectionService:
                    (segment_start - frame_duration < frame_time <= segment_end):
                     segment_energies.append(rms_energy)
             
-            # Skip if insufficient frames found
+            # Skip if insufficient frames found (need at least 2 for deltas)
             if len(segment_energies) < 2:
-                # Need at least 2 frames to compute variance
                 continue
             
-            # Compute energy statistics
-            energy_mean = np.mean(segment_energies)
-            energy_std = np.std(segment_energies)
+            # Compute temporal RMS modulation (frame-to-frame changes)
+            rms_array = np.array(segment_energies)
+            rms_deltas = np.abs(np.diff(rms_array))
+            modulation_mean = float(np.mean(rms_deltas))
             
-            # Compute relative variance (coefficient of variation)
-            # This is more robust than absolute std for detecting static noise
-            relative_variance = energy_std / (energy_mean + self.EPSILON)
+            # Compute energy mean for relative modulation calculation
+            energy_mean = float(np.mean(segment_energies))
             
-            # Keep segment only if relative energy variance >= threshold
-            # Static noise has very low relative variance (nearly constant energy)
-            # Real speech has higher relative variance (dynamic energy modulation)
-            if relative_variance >= self.MIN_RELATIVE_ENERGY_VARIANCE:
+            # Compute relative temporal modulation
+            # Static/hiss noise has very low frame-to-frame changes
+            # Real speech has higher temporal modulation
+            relative_modulation = modulation_mean / (energy_mean + self.EPSILON)
+            
+            # Reject segment if relative temporal modulation is too low
+            # This catches stationary noise that might pass other filters
+            if relative_modulation >= self.MIN_RELATIVE_RMS_MODULATION:
                 filtered.append((segment_start, segment_end))
         
         return filtered
