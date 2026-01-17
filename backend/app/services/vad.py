@@ -28,8 +28,9 @@ class VoiceActivityDetectionService:
     # Minimum voicing density ratio (voiced_frames / total_frames)
     MIN_VOICING_DENSITY = 0.6
     
-    # Minimum energy standard deviation (reject static/hiss noise)
-    MIN_ENERGY_STD = 0.01
+    # Minimum relative energy variance (std/mean) for rejecting static/hiss noise
+    MIN_RELATIVE_ENERGY_VARIANCE = 0.05
+    EPSILON = 1e-6  # Small epsilon to avoid division by zero
     
     def __init__(self):
         """Initialize VAD service."""
@@ -92,8 +93,10 @@ class VoiceActivityDetectionService:
                 # Compute RMS energy for this frame
                 # Convert bytes to 16-bit samples
                 frame_samples = np.frombuffer(frame, dtype=np.int16)
+                # Normalize int16 samples to float32 in range [-1, 1]
+                normalized_samples = frame_samples.astype(np.float32) / 32768.0
                 # Compute RMS: sqrt(mean(samples^2))
-                rms_energy = np.sqrt(np.mean(frame_samples.astype(np.float32) ** 2))
+                rms_energy = np.sqrt(np.mean(normalized_samples ** 2))
                 
                 # Track all frame decisions and energies for filtering
                 frame_decisions.append((frame_time, is_speech))
@@ -108,14 +111,15 @@ class VoiceActivityDetectionService:
             # Merge small gaps
             segments = self._merge_gaps(segments)
             
-            # Filter short segments
+            # Apply filters in correct order:
+            # 1. Minimum duration
             segments = self._filter_short_segments(segments)
             
-            # Apply voicing density filter (reject static/hiss noise)
-            segments = self._filter_low_voicing_density(segments, frame_decisions)
-            
-            # Apply energy variance filter (reject static/hiss noise)
+            # 2. Energy modulation rejection (relative variance)
             segments = self._filter_low_energy_variance(segments, frame_energies)
+            
+            # 3. Voiced frame ratio
+            segments = self._filter_low_voicing_density(segments, frame_decisions)
             
             return segments
             
@@ -253,15 +257,16 @@ class VoiceActivityDetectionService:
     
     def _filter_low_energy_variance(self, segments: List[Tuple[float, float]], frame_energies: List[Tuple[float, float]]) -> List[Tuple[float, float]]:
         """
-        Filter out segments with low energy variance (static/hiss noise rejection).
-        Only segments where energy standard deviation >= MIN_ENERGY_STD are kept.
+        Filter out segments with low relative energy variance (static/hiss noise rejection).
+        Uses relative variance (std/mean) to detect static noise vs dynamic speech.
+        Only segments where relative energy variance >= threshold are kept.
         
         Args:
             segments: List of (start, end) segment tuples
-            frame_energies: List of (frame_time, rms_energy) tuples for all frames
+            frame_energies: List of (frame_time, rms_energy) tuples for ALL frames in segment
             
         Returns:
-            Filtered segments with sufficient energy variance
+            Filtered segments with sufficient energy modulation
         """
         if not segments or not frame_energies:
             return segments
@@ -270,7 +275,8 @@ class VoiceActivityDetectionService:
         frame_duration = self.FRAME_DURATION_MS / 1000.0
         
         for segment_start, segment_end in segments:
-            # Collect RMS energy values for frames within this segment
+            # Collect RMS energy values for ALL frames within this segment window
+            # Not just voiced frames - we need to analyze the entire segment
             segment_energies = []
             
             for frame_time, rms_energy in frame_energies:
@@ -279,16 +285,23 @@ class VoiceActivityDetectionService:
                    (segment_start - frame_duration < frame_time <= segment_end):
                     segment_energies.append(rms_energy)
             
-            # Skip if no frames found (shouldn't happen, but safety check)
+            # Skip if insufficient frames found
             if len(segment_energies) < 2:
-                # Need at least 2 frames to compute std dev
+                # Need at least 2 frames to compute variance
                 continue
             
-            # Compute energy standard deviation
+            # Compute energy statistics
+            energy_mean = np.mean(segment_energies)
             energy_std = np.std(segment_energies)
             
-            # Keep segment only if energy standard deviation >= threshold
-            if energy_std >= self.MIN_ENERGY_STD:
+            # Compute relative variance (coefficient of variation)
+            # This is more robust than absolute std for detecting static noise
+            relative_variance = energy_std / (energy_mean + self.EPSILON)
+            
+            # Keep segment only if relative energy variance >= threshold
+            # Static noise has very low relative variance (nearly constant energy)
+            # Real speech has higher relative variance (dynamic energy modulation)
+            if relative_variance >= self.MIN_RELATIVE_ENERGY_VARIANCE:
                 filtered.append((segment_start, segment_end))
         
         return filtered
