@@ -24,6 +24,9 @@ class VoiceActivityDetectionService:
     # Discard segments shorter than this (seconds)
     MIN_SEGMENT_DURATION = 0.5
     
+    # Minimum voicing density ratio (voiced_frames / total_frames)
+    MIN_VOICING_DENSITY = 0.6
+    
     def __init__(self):
         """Initialize VAD service."""
         self.storage_dir = Path(__file__).parent.parent / "storage" / "audio"
@@ -63,6 +66,8 @@ class VoiceActivityDetectionService:
             frame_size_bytes = frame_size_samples * sample_width
             num_frames = len(audio_data) // frame_size_bytes
             
+            # Track frame-level VAD decisions for voicing density calculation
+            frame_decisions = []  # List of (frame_time, is_speech) tuples
             speech_frames = []
             
             # Detect speech in each frame
@@ -75,11 +80,15 @@ class VoiceActivityDetectionService:
                 if len(frame) != frame_size_bytes:
                     break
                 
+                # Convert frame index to time
+                frame_time = i * self.FRAME_DURATION_MS / 1000.0
                 is_speech = self.vad.is_speech(frame, sample_rate)
+                
+                # Track all frame decisions for voicing density calculation
+                frame_decisions.append((frame_time, is_speech))
+                
                 if is_speech:
-                    # Convert frame index to time
-                    start_time = i * self.FRAME_DURATION_MS / 1000.0
-                    speech_frames.append(start_time)
+                    speech_frames.append(frame_time)
             
             # Convert speech frames to segments
             segments = self._frames_to_segments(speech_frames)
@@ -89,6 +98,9 @@ class VoiceActivityDetectionService:
             
             # Filter short segments
             segments = self._filter_short_segments(segments)
+            
+            # Apply voicing density filter (reject static/hiss noise)
+            segments = self._filter_low_voicing_density(segments, frame_decisions)
             
             return segments
             
@@ -177,6 +189,50 @@ class VoiceActivityDetectionService:
             duration = end - start
             if duration >= self.MIN_SEGMENT_DURATION:
                 filtered.append((start, end))
+        
+        return filtered
+    
+    def _filter_low_voicing_density(self, segments: List[Tuple[float, float]], frame_decisions: List[Tuple[float, bool]]) -> List[Tuple[float, float]]:
+        """
+        Filter out segments with low voicing density (static/hiss noise rejection).
+        Only segments where at least MIN_VOICING_DENSITY of frames are voiced are kept.
+        
+        Args:
+            segments: List of (start, end) segment tuples
+            frame_decisions: List of (frame_time, is_speech) tuples for all frames
+            
+        Returns:
+            Filtered segments with sufficient voicing density
+        """
+        if not segments or not frame_decisions:
+            return segments
+        
+        filtered = []
+        frame_duration = self.FRAME_DURATION_MS / 1000.0
+        
+        for segment_start, segment_end in segments:
+            # Count frames within this segment
+            total_frames = 0
+            voiced_frames = 0
+            
+            for frame_time, is_speech in frame_decisions:
+                # Check if frame is within segment (with small tolerance for frame boundaries)
+                if segment_start <= frame_time < segment_end or \
+                   (segment_start - frame_duration < frame_time <= segment_end):
+                    total_frames += 1
+                    if is_speech:
+                        voiced_frames += 1
+            
+            # Skip if no frames found (shouldn't happen, but safety check)
+            if total_frames == 0:
+                continue
+            
+            # Calculate voicing density
+            voicing_density = voiced_frames / total_frames
+            
+            # Keep segment only if voicing density >= threshold
+            if voicing_density >= self.MIN_VOICING_DENSITY:
+                filtered.append((segment_start, segment_end))
         
         return filtered
     
