@@ -1,6 +1,7 @@
 import webrtcvad
 import wave
 import json
+import numpy as np
 from pathlib import Path
 from typing import List, Tuple, Optional
 
@@ -26,6 +27,9 @@ class VoiceActivityDetectionService:
     
     # Minimum voicing density ratio (voiced_frames / total_frames)
     MIN_VOICING_DENSITY = 0.6
+    
+    # Minimum energy standard deviation (reject static/hiss noise)
+    MIN_ENERGY_STD = 0.01
     
     def __init__(self):
         """Initialize VAD service."""
@@ -66,11 +70,12 @@ class VoiceActivityDetectionService:
             frame_size_bytes = frame_size_samples * sample_width
             num_frames = len(audio_data) // frame_size_bytes
             
-            # Track frame-level VAD decisions for voicing density calculation
+            # Track frame-level VAD decisions and RMS energy for filtering
             frame_decisions = []  # List of (frame_time, is_speech) tuples
+            frame_energies = []  # List of (frame_time, rms_energy) tuples
             speech_frames = []
             
-            # Detect speech in each frame
+            # Detect speech in each frame and compute RMS energy
             for i in range(num_frames):
                 frame_start = i * frame_size_bytes
                 frame_end = frame_start + frame_size_bytes
@@ -84,8 +89,15 @@ class VoiceActivityDetectionService:
                 frame_time = i * self.FRAME_DURATION_MS / 1000.0
                 is_speech = self.vad.is_speech(frame, sample_rate)
                 
-                # Track all frame decisions for voicing density calculation
+                # Compute RMS energy for this frame
+                # Convert bytes to 16-bit samples
+                frame_samples = np.frombuffer(frame, dtype=np.int16)
+                # Compute RMS: sqrt(mean(samples^2))
+                rms_energy = np.sqrt(np.mean(frame_samples.astype(np.float32) ** 2))
+                
+                # Track all frame decisions and energies for filtering
                 frame_decisions.append((frame_time, is_speech))
+                frame_energies.append((frame_time, rms_energy))
                 
                 if is_speech:
                     speech_frames.append(frame_time)
@@ -101,6 +113,9 @@ class VoiceActivityDetectionService:
             
             # Apply voicing density filter (reject static/hiss noise)
             segments = self._filter_low_voicing_density(segments, frame_decisions)
+            
+            # Apply energy variance filter (reject static/hiss noise)
+            segments = self._filter_low_energy_variance(segments, frame_energies)
             
             return segments
             
@@ -232,6 +247,48 @@ class VoiceActivityDetectionService:
             
             # Keep segment only if voicing density >= threshold
             if voicing_density >= self.MIN_VOICING_DENSITY:
+                filtered.append((segment_start, segment_end))
+        
+        return filtered
+    
+    def _filter_low_energy_variance(self, segments: List[Tuple[float, float]], frame_energies: List[Tuple[float, float]]) -> List[Tuple[float, float]]:
+        """
+        Filter out segments with low energy variance (static/hiss noise rejection).
+        Only segments where energy standard deviation >= MIN_ENERGY_STD are kept.
+        
+        Args:
+            segments: List of (start, end) segment tuples
+            frame_energies: List of (frame_time, rms_energy) tuples for all frames
+            
+        Returns:
+            Filtered segments with sufficient energy variance
+        """
+        if not segments or not frame_energies:
+            return segments
+        
+        filtered = []
+        frame_duration = self.FRAME_DURATION_MS / 1000.0
+        
+        for segment_start, segment_end in segments:
+            # Collect RMS energy values for frames within this segment
+            segment_energies = []
+            
+            for frame_time, rms_energy in frame_energies:
+                # Check if frame is within segment (with small tolerance for frame boundaries)
+                if segment_start <= frame_time < segment_end or \
+                   (segment_start - frame_duration < frame_time <= segment_end):
+                    segment_energies.append(rms_energy)
+            
+            # Skip if no frames found (shouldn't happen, but safety check)
+            if len(segment_energies) < 2:
+                # Need at least 2 frames to compute std dev
+                continue
+            
+            # Compute energy standard deviation
+            energy_std = np.std(segment_energies)
+            
+            # Keep segment only if energy standard deviation >= threshold
+            if energy_std >= self.MIN_ENERGY_STD:
                 filtered.append((segment_start, segment_end))
         
         return filtered
