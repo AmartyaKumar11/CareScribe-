@@ -1,0 +1,23 @@
+# =========================
+# Python cache
+# =========================
+__pycache__/
+*.pyc
+*.pyo
+
+# =========================
+# Virtual environment
+# =========================
+venv/
+
+# =========================
+# Runtime audio artifacts
+# =========================
+backend/app/storage/audio/*
+!backend/app/storage/audio/.gitkeep
+
+# =========================
+# OS / Editor junk
+# =========================
+.DS_Store
+Thumbs.db
