@@ -98,6 +98,15 @@ class VoiceActivityDetectionService:
                 # Compute RMS: sqrt(mean(samples^2))
                 rms_energy = np.sqrt(np.mean(normalized_samples ** 2))
                 
+                # Frame-level debug print
+                frame_duration = self.FRAME_DURATION_MS / 1000.0
+                print(
+                    "FRAME",
+                    "t=", round(i * frame_duration, 3),
+                    "vad=", is_speech,
+                    "rms=", round(float(rms_energy), 6)
+                )
+                
                 # Track all frame decisions and energies for filtering
                 frame_decisions.append((frame_time, is_speech))
                 frame_energies.append((frame_time, rms_energy))
@@ -119,7 +128,7 @@ class VoiceActivityDetectionService:
             segments = self._filter_low_energy_variance(segments, frame_energies)
             
             # 3. Voiced frame ratio
-            segments = self._filter_low_voicing_density(segments, frame_decisions)
+            segments = self._filter_low_voicing_density(segments, frame_decisions, frame_energies)
             
             return segments
             
@@ -211,7 +220,7 @@ class VoiceActivityDetectionService:
         
         return filtered
     
-    def _filter_low_voicing_density(self, segments: List[Tuple[float, float]], frame_decisions: List[Tuple[float, bool]]) -> List[Tuple[float, float]]:
+    def _filter_low_voicing_density(self, segments: List[Tuple[float, float]], frame_decisions: List[Tuple[float, bool]], frame_energies: List[Tuple[float, float]]) -> List[Tuple[float, float]]:
         """
         Filter out segments with low voicing density (static/hiss noise rejection).
         Only segments where at least MIN_VOICING_DENSITY of frames are voiced are kept.
@@ -219,6 +228,7 @@ class VoiceActivityDetectionService:
         Args:
             segments: List of (start, end) segment tuples
             frame_decisions: List of (frame_time, is_speech) tuples for all frames
+            frame_energies: List of (frame_time, rms_energy) tuples for debug output
             
         Returns:
             Filtered segments with sufficient voicing density
@@ -233,6 +243,7 @@ class VoiceActivityDetectionService:
             # Count frames within this segment
             total_frames = 0
             voiced_frames = 0
+            segment_energies = []
             
             for frame_time, is_speech in frame_decisions:
                 # Check if frame is within segment (with small tolerance for frame boundaries)
@@ -242,12 +253,38 @@ class VoiceActivityDetectionService:
                     if is_speech:
                         voiced_frames += 1
             
+            # Collect energy values for debug output
+            for frame_time, rms_energy in frame_energies:
+                if segment_start <= frame_time < segment_end or \
+                   (segment_start - frame_duration < frame_time <= segment_end):
+                    segment_energies.append(rms_energy)
+            
             # Skip if no frames found (shouldn't happen, but safety check)
             if total_frames == 0:
                 continue
             
             # Calculate voicing density
             voicing_density = voiced_frames / total_frames
+            
+            # Compute energy statistics for debug output
+            if len(segment_energies) >= 2:
+                energy_mean = np.mean(segment_energies)
+                energy_std = np.std(segment_energies)
+            else:
+                energy_mean = 0.0
+                energy_std = 0.0
+            
+            # Segment-level debug print
+            print(
+                "DEBUG VAD SEGMENT",
+                "start=", round(segment_start, 3),
+                "end=", round(segment_end, 3),
+                "frames=", total_frames,
+                "voiced_frames=", voiced_frames,
+                "voiced_ratio=", round(voicing_density, 3),
+                "energy_mean=", round(float(energy_mean), 6),
+                "energy_std=", round(float(energy_std), 6),
+            )
             
             # Keep segment only if voicing density >= threshold
             if voicing_density >= self.MIN_VOICING_DENSITY:
