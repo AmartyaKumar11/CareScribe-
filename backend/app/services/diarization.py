@@ -242,7 +242,7 @@ class DiarizationService:
             return []
         
         # Extract embedding for each VAD segment
-        for segment in vad_segments:
+        for segment_idx, segment in enumerate(vad_segments):
             start_time = segment.get("start", 0.0)
             end_time = segment.get("end", 0.0)
             
@@ -261,12 +261,30 @@ class DiarizationService:
             
             # Extract embedding for this segment
             embedding = self.extract_embedding(segment_audio)
+            
+            # Debug logging: segment index, timing, embedding shape
             if embedding is not None:
+                print(
+                    "EMBEDDING",
+                    "segment_idx=", segment_idx,
+                    "start=", round(start_time, 3),
+                    "end=", round(end_time, 3),
+                    "embedding_shape=", embedding.shape
+                )
                 embeddings.append(embedding)
             else:
                 # If embedding extraction fails, add zero vector to maintain alignment
                 # This should be rare, but ensures list length matches segment count
-                embeddings.append(np.zeros(192, dtype=np.float32))  # ECAPA-TDNN output size
+                zero_embedding = np.zeros(192, dtype=np.float32)  # ECAPA-TDNN output size
+                print(
+                    "EMBEDDING",
+                    "segment_idx=", segment_idx,
+                    "start=", round(start_time, 3),
+                    "end=", round(end_time, 3),
+                    "embedding_shape=", zero_embedding.shape,
+                    "status=FAILED"
+                )
+                embeddings.append(zero_embedding)
         
         return embeddings
     
