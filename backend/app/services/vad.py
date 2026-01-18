@@ -125,7 +125,7 @@ class VoiceActivityDetectionService:
             # 1. Minimum duration
             segments = self._filter_short_segments(segments)
             
-            # 2. Temporal RMS modulation rejection (reject static/hiss noise)
+            # 2. Temporal modulation and delta-sparsity rejection (reject static/hiss noise)
             segments = self._filter_low_temporal_rms_modulation(segments, frame_energies)
             
             # 3. Voiced frame ratio
@@ -276,11 +276,16 @@ class VoiceActivityDetectionService:
                 rms_deltas = np.abs(np.diff(rms_array))
                 modulation_mean = float(np.mean(rms_deltas))
                 relative_modulation = modulation_mean / (energy_mean + self.EPSILON)
+                # Compute delta sparsity for debug
+                high_delta_ratio = float(
+                    np.mean(rms_deltas > (3.0 * modulation_mean))
+                )
             else:
                 energy_mean = 0.0
                 energy_std = 0.0
                 modulation_mean = 0.0
                 relative_modulation = 0.0
+                high_delta_ratio = 0.0
             
             # Segment-level debug print
             print(
@@ -294,6 +299,7 @@ class VoiceActivityDetectionService:
                 "energy_std=", round(float(energy_std), 6),
                 "modulation_mean=", round(float(modulation_mean), 6),
                 "relative_modulation=", round(float(relative_modulation), 6),
+                "high_delta_ratio=", round(float(high_delta_ratio), 6),
             )
             
             # Keep segment only if voicing density >= threshold
@@ -304,16 +310,18 @@ class VoiceActivityDetectionService:
     
     def _filter_low_temporal_rms_modulation(self, segments: List[Tuple[float, float]], frame_energies: List[Tuple[float, float]]) -> List[Tuple[float, float]]:
         """
-        Filter out segments with low temporal RMS modulation (static/hiss noise rejection).
-        Analyzes frame-to-frame RMS changes to detect stationary noise vs dynamic speech.
-        Only segments with sufficient temporal modulation are kept.
+        Filter out segments with low temporal RMS modulation and delta sparsity (static/hiss noise rejection).
+        Uses combined rejection rule:
+        - Relative modulation < 0.2 AND high-delta ratio < 0.1 → reject
+        This detects stationary noise vs dynamic speech by analyzing frame-to-frame RMS changes
+        and the presence of bursty changes (syllabic spikes in real speech).
         
         Args:
             segments: List of (start, end) segment tuples
             frame_energies: List of (frame_time, rms_energy) tuples for ALL frames
             
         Returns:
-            Filtered segments with sufficient temporal RMS modulation
+            Filtered segments with sufficient temporal RMS modulation and delta sparsity
         """
         if not segments or not frame_energies:
             return segments
@@ -349,10 +357,27 @@ class VoiceActivityDetectionService:
             # Real speech has higher temporal modulation
             relative_modulation = modulation_mean / (energy_mean + self.EPSILON)
             
-            # Reject segment if relative temporal modulation is too low
-            # This catches stationary noise that might pass other filters
-            if relative_modulation >= self.MIN_RELATIVE_RMS_MODULATION:
-                filtered.append((segment_start, segment_end))
+            # Compute delta sparsity (detect lack of bursty RMS changes)
+            # High delta ratio measures proportion of large frame-to-frame changes
+            # Real speech has bursty changes (syllabic spikes), hiss does not
+            high_delta_ratio = float(
+                np.mean(rms_deltas > (3.0 * modulation_mean))
+            )
+            
+            # Combined rejection rule: reject stationary noise or hiss
+            # Both conditions must be true to reject:
+            # - Low relative modulation (< 0.2) AND
+            # - Low high-delta ratio (< 0.1, meaning few bursty changes)
+            # This preserves quiet but structured speech while rejecting hiss
+            if (
+                relative_modulation < 0.2 and
+                high_delta_ratio < 0.1
+            ):
+                # Stationary noise or hiss - reject segment
+                continue
+            
+            # Segment passes temporal modulation and delta-sparsity checks
+            filtered.append((segment_start, segment_end))
         
         return filtered
     
