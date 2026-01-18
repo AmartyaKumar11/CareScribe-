@@ -1,8 +1,8 @@
 """
 Speaker Diarization Service (Phase 2.3)
 
-This module defines the contract for speaker diarization output.
-Implementation will be added in Phase 2.3.
+This module implements speaker diarization using ECAPA-TDNN embeddings
+and agglomerative clustering. Phase 2.3 is LOCKED.
 
 PHASE 2.3 DIARIZATION OUTPUT CONTRACT
 ======================================
@@ -89,7 +89,14 @@ Phase Boundaries:
     - Phase 2.4+ may consume diarization.json for downstream processing
 
 Implementation Status:
-    CONTRACT DEFINED - Implementation pending Phase 2.3
+    PHASE 2.3 LOCKED - Implementation complete
+
+Phase 2.3 LOCKED:
+    - ECAPA-TDNN embeddings (CPU-only, L2-normalized)
+    - Agglomerative clustering (cosine distance, average linkage)
+    - diarization.json is a stable internal contract
+    - Output format: {"speakers": [{"speaker_id": str, "segments": [...]}, ...]}
+    - Output consumed by: Phase 2.4+ (downstream processing)
 """
 
 from typing import List, Dict, Any, Optional
@@ -108,14 +115,16 @@ class DiarizationService:
     
     Contract: See module-level documentation above.
     
-    This class will be implemented in Phase 2.3 to assign speaker IDs
-    to segments from vad_segments.json.
+    Assigns speaker IDs to segments from vad_segments.json using
+    ECAPA-TDNN embeddings and agglomerative clustering.
     
-    Phase 2.3 LOCKED CONTRACT:
+    Phase 2.3 LOCKED:
     - Input: vad_segments.json (from Phase 2.2)
     - Input: normalized.wav (from Phase 2.1)
-    - Output: diarization.json (this contract)
+    - Output: diarization.json (stable contract)
     - Output location: storage/audio/{session_id}/diarization.json
+    - Embedding: ECAPA-TDNN (CPU-only, L2-normalized, 192-dim)
+    - Clustering: Agglomerative (cosine distance, average linkage, threshold=0.3)
     """
     
     # Clustering distance threshold (cosine distance for stopping clustering)
@@ -271,28 +280,12 @@ class DiarizationService:
             # Extract embedding for this segment
             embedding = self.extract_embedding(segment_audio)
             
-            # Debug logging: segment index, timing, embedding shape
             if embedding is not None:
-                print(
-                    "EMBEDDING",
-                    "segment_idx=", segment_idx,
-                    "start=", round(start_time, 3),
-                    "end=", round(end_time, 3),
-                    "embedding_shape=", embedding.shape
-                )
                 embeddings.append(embedding)
             else:
                 # If embedding extraction fails, add zero vector to maintain alignment
                 # This should be rare, but ensures list length matches segment count
                 zero_embedding = np.zeros(192, dtype=np.float32)  # ECAPA-TDNN output size
-                print(
-                    "EMBEDDING",
-                    "segment_idx=", segment_idx,
-                    "start=", round(start_time, 3),
-                    "end=", round(end_time, 3),
-                    "embedding_shape=", zero_embedding.shape,
-                    "status=FAILED"
-                )
                 embeddings.append(zero_embedding)
         
         return embeddings
