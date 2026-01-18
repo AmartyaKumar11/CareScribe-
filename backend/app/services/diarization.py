@@ -162,14 +162,18 @@ class DiarizationService:
         if not embeddings:
             return None
         
-        # TODO: Cluster embeddings to assign speaker IDs
-        # speaker_assignments = self._cluster_embeddings(embeddings, vad_segments)
+        # Cluster embeddings to assign speaker IDs
+        speaker_assignments = self._cluster_embeddings(embeddings, vad_segments)
+        if not speaker_assignments:
+            return None
         
-        # TODO: Group segments by speaker and format output
-        # diarization_data = self._group_segments_by_speaker(speaker_assignments, vad_segments)
+        # Group segments by speaker and format output
+        diarization_data = self._group_segments_by_speaker(speaker_assignments, vad_segments)
+        if not diarization_data:
+            return None
         
-        # Placeholder: Return None until implementation
-        return None
+        # Save diarization output
+        return self._save_diarization(session_id, diarization_data)
     
     def _load_vad_segments(self, session_id: str) -> Optional[List[Dict[str, float]]]:
         """
@@ -370,35 +374,44 @@ class DiarizationService:
     
     def _cluster_embeddings(self, embeddings: List[np.ndarray], vad_segments: List[Dict[str, float]]) -> Dict[int, str]:
         """
-        Cluster embeddings to assign speaker IDs.
-        
-        This method uses cluster_embeddings() and will map labels to speaker IDs.
-        Currently returns cluster labels as-is (implementation pending).
+        Cluster embeddings and map cluster labels to speaker IDs.
         
         Args:
             embeddings: List of embeddings (one per segment)
             vad_segments: List of VAD segments (for reference)
             
         Returns:
-            Dictionary mapping segment index to speaker_id (placeholder)
+            Dictionary mapping segment index to speaker_id (SPEAKER_0, SPEAKER_1, ...)
         """
         # Cluster embeddings using agglomerative clustering
         cluster_labels = self.cluster_embeddings(embeddings)
         
-        # TODO: Map cluster labels to speaker IDs (SPEAKER_0, SPEAKER_1, ...)
-        # For now, return placeholder mapping
-        # This will be implemented in next step
-        return {}
+        if not cluster_labels:
+            return {}
+        
+        # Map cluster labels to speaker IDs
+        # Get unique cluster labels and sort to ensure deterministic mapping
+        unique_labels = sorted(set(cluster_labels))
+        
+        # Create mapping: cluster_label -> speaker_id
+        label_to_speaker = {
+            label: f"SPEAKER_{i}" for i, label in enumerate(unique_labels)
+        }
+        
+        # Map each segment index to speaker_id
+        speaker_assignments = {}
+        for segment_idx, cluster_label in enumerate(cluster_labels):
+            speaker_id = label_to_speaker[cluster_label]
+            speaker_assignments[segment_idx] = speaker_id
+        
+        return speaker_assignments
     
     def _group_segments_by_speaker(self, speaker_assignments: Dict[int, str], vad_segments: List[Dict[str, float]]) -> Dict[str, Any]:
         """
         Group segments by speaker and format output according to contract.
         
-        TODO: Phase 2.3 implementation
-        - Group segments by assigned speaker_id
-        - Format according to diarization.json contract
-        - Ensure all VAD segments are included exactly once
-        - Ensure non-overlapping constraint
+        Groups segments by assigned speaker_id and formats according to
+        diarization.json schema. All VAD segments must appear exactly once.
         
         Args:
             speaker_assignments: Dictionary mapping segment index to speaker_id
@@ -407,8 +420,47 @@ class DiarizationService:
         Returns:
             Dictionary conforming to diarization.json schema
         """
-        # TODO: Implement segment grouping and output formatting
-        pass
+        if not speaker_assignments or not vad_segments:
+            return {}
+        
+        # Group segments by speaker_id
+        speaker_segments: Dict[str, List[Dict[str, float]]] = {}
+        
+        for segment_idx, speaker_id in speaker_assignments.items():
+            # Verify segment index is valid
+            if segment_idx < 0 or segment_idx >= len(vad_segments):
+                continue
+            
+            # Get original segment (preserve times exactly)
+            segment = vad_segments[segment_idx]
+            start_time = segment.get("start", 0.0)
+            end_time = segment.get("end", 0.0)
+            
+            # Create segment dict with preserved times
+            segment_dict = {
+                "start": float(start_time),
+                "end": float(end_time)
+            }
+            
+            # Add to speaker's segment list
+            if speaker_id not in speaker_segments:
+                speaker_segments[speaker_id] = []
+            
+            speaker_segments[speaker_id].append(segment_dict)
+        
+        # Format output according to diarization.json contract
+        speakers_list = []
+        for speaker_id in sorted(speaker_segments.keys()):  # Sort for deterministic output
+            speakers_list.append({
+                "speaker_id": speaker_id,
+                "segments": speaker_segments[speaker_id]
+            })
+        
+        diarization_data = {
+            "speakers": speakers_list
+        }
+        
+        return diarization_data
     
     def _save_diarization(self, session_id: str, diarization_data: Dict[str, Any]) -> Optional[Path]:
         """
