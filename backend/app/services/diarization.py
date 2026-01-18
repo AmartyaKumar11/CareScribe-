@@ -95,6 +95,10 @@ Implementation Status:
 from typing import List, Dict, Any, Optional
 from pathlib import Path
 import json
+import numpy as np
+import wave
+import torch
+from speechbrain.inference.speaker import EncoderClassifier
 
 
 class DiarizationService:
@@ -116,6 +120,14 @@ class DiarizationService:
     def __init__(self):
         """Initialize diarization service."""
         self.storage_dir = Path(__file__).parent.parent / "storage" / "audio"
+        # Initialize ECAPA-TDNN speaker embedding model (CPU-only)
+        try:
+            self.embedding_model = EncoderClassifier.from_hparams(
+                source="speechbrain/spkrec-ecapa-voxceleb",
+                run_opts={"device": "cpu"}
+            )
+        except Exception:
+            self.embedding_model = None
     
     def run(self, session_id: str) -> Optional[Path]:
         """
@@ -140,8 +152,10 @@ class DiarizationService:
         if not normalized_audio_path or not normalized_audio_path.exists():
             return None
         
-        # TODO: Extract embeddings for each VAD segment
-        # embeddings = self._extract_embeddings(normalized_audio_path, vad_segments)
+        # Extract embeddings for each VAD segment
+        embeddings = self._extract_embeddings(normalized_audio_path, vad_segments)
+        if not embeddings:
+            return None
         
         # TODO: Cluster embeddings to assign speaker IDs
         # speaker_assignments = self._cluster_embeddings(embeddings, vad_segments)
@@ -191,23 +205,109 @@ class DiarizationService:
         
         return None
     
-    def _extract_embeddings(self, normalized_audio_path: Path, vad_segments: List[Dict[str, float]]) -> List[Any]:
+    def _extract_embeddings(self, normalized_audio_path: Path, vad_segments: List[Dict[str, float]]) -> List[np.ndarray]:
         """
-        Extract embeddings for each VAD segment.
-        
-        TODO: Phase 2.3 implementation
-        - Extract audio features/embeddings for each segment
-        - Return list of embeddings (one per segment)
+        Extract speaker embeddings for each VAD segment using ECAPA-TDNN.
         
         Args:
-            normalized_audio_path: Path to normalized.wav
+            normalized_audio_path: Path to normalized.wav (16kHz mono)
             vad_segments: List of VAD segments with 'start' and 'end' times
             
         Returns:
-            List of embeddings (structure TBD)
+            List of L2-normalized embedding vectors (one per segment)
         """
-        # TODO: Implement embedding extraction
-        pass
+        if self.embedding_model is None:
+            return []
+        
+        if not normalized_audio_path.exists():
+            return []
+        
+        embeddings = []
+        
+        # Load full audio file
+        try:
+            with wave.open(str(normalized_audio_path), 'rb') as wf:
+                sample_rate = wf.getframerate()
+                channels = wf.getnchannels()
+                sample_width = wf.getsampwidth()
+                
+                # Verify format (must be 16kHz mono)
+                if sample_rate != 16000 or channels != 1 or sample_width != 2:
+                    return []
+                
+                # Read all audio data
+                audio_data = wf.readframes(wf.getnframes())
+                audio_samples = np.frombuffer(audio_data, dtype=np.int16).astype(np.float32) / 32768.0
+        except Exception:
+            return []
+        
+        # Extract embedding for each VAD segment
+        for segment in vad_segments:
+            start_time = segment.get("start", 0.0)
+            end_time = segment.get("end", 0.0)
+            
+            # Extract audio segment
+            start_sample = int(start_time * sample_rate)
+            end_sample = int(end_time * sample_rate)
+            
+            if start_sample >= len(audio_samples) or end_sample > len(audio_samples):
+                # Skip invalid segments
+                continue
+            
+            segment_audio = audio_samples[start_sample:end_sample]
+            
+            if len(segment_audio) == 0:
+                continue
+            
+            # Extract embedding for this segment
+            embedding = self.extract_embedding(segment_audio)
+            if embedding is not None:
+                embeddings.append(embedding)
+            else:
+                # If embedding extraction fails, add zero vector to maintain alignment
+                # This should be rare, but ensures list length matches segment count
+                embeddings.append(np.zeros(192, dtype=np.float32))  # ECAPA-TDNN output size
+        
+        return embeddings
+    
+    def extract_embedding(self, audio_segment: np.ndarray) -> Optional[np.ndarray]:
+        """
+        Extract speaker embedding from audio segment using ECAPA-TDNN.
+        
+        Args:
+            audio_segment: Audio samples as numpy array (float32, range [-1, 1])
+                          Expected: normalized mono 16kHz PCM
+            
+        Returns:
+            L2-normalized embedding vector (192-dim for ECAPA-TDNN) or None on error
+        """
+        if self.embedding_model is None:
+            return None
+        
+        if len(audio_segment) == 0:
+            return None
+        
+        try:
+            # Convert to torch tensor and add batch dimension
+            # ECAPA expects shape: [batch, channels, samples]
+            audio_tensor = torch.from_numpy(audio_segment).unsqueeze(0).unsqueeze(0)
+            
+            # Extract embedding (inference only, CPU)
+            with torch.no_grad():
+                embedding = self.embedding_model.encode_batch(audio_tensor)
+            
+            # Convert to numpy and squeeze batch dimension
+            embedding_np = embedding.squeeze(0).cpu().numpy()
+            
+            # L2 normalization
+            norm = np.linalg.norm(embedding_np)
+            if norm > 0:
+                embedding_np = embedding_np / norm
+            
+            return embedding_np.astype(np.float32)
+            
+        except Exception:
+            return None
     
     def _cluster_embeddings(self, embeddings: List[Any], vad_segments: List[Dict[str, float]]) -> Dict[int, str]:
         """

@@ -6,4 +6,5 @@ torch
 ffmpeg-python
 webrtcvad
 numpy
+speechbrain
 
