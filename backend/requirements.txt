@@ -8,4 +8,5 @@ webrtcvad
 numpy
 speechbrain
 scikit-learn
+pytest
 
