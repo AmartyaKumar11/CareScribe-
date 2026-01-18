@@ -7,4 +7,5 @@ ffmpeg-python
 webrtcvad
 numpy
 speechbrain
+scikit-learn
 

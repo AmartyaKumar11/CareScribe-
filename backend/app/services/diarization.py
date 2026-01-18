@@ -99,6 +99,7 @@ import numpy as np
 import wave
 import torch
 from speechbrain.inference.speaker import EncoderClassifier
+from sklearn.cluster import AgglomerativeClustering
 
 
 class DiarizationService:
@@ -116,6 +117,10 @@ class DiarizationService:
     - Output: diarization.json (this contract)
     - Output location: storage/audio/{session_id}/diarization.json
     """
+    
+    # Clustering distance threshold (cosine distance for stopping clustering)
+    # Lower values = more clusters (stricter similarity requirement)
+    CLUSTERING_DISTANCE_THRESHOLD = 0.3
     
     def __init__(self):
         """Initialize diarization service."""
@@ -327,24 +332,63 @@ class DiarizationService:
         except Exception:
             return None
     
-    def _cluster_embeddings(self, embeddings: List[Any], vad_segments: List[Dict[str, float]]) -> Dict[int, str]:
+    def cluster_embeddings(self, embeddings: List[np.ndarray]) -> List[int]:
+        """
+        Cluster embeddings using Agglomerative Hierarchical Clustering.
+        
+        Uses cosine distance metric and average linkage.
+        Distance threshold stopping rule determines number of clusters.
+        
+        Args:
+            embeddings: List of L2-normalized embedding vectors
+            
+        Returns:
+            List of cluster labels (integers) corresponding to each embedding
+        """
+        if not embeddings:
+            return []
+        
+        if len(embeddings) == 1:
+            # Single embedding = single cluster
+            return [0]
+        
+        # Convert embeddings list to numpy array for clustering
+        embedding_matrix = np.vstack(embeddings)
+        
+        # Agglomerative clustering with cosine distance and average linkage
+        clustering = AgglomerativeClustering(
+            n_clusters=None,  # Use distance threshold instead
+            distance_threshold=self.CLUSTERING_DISTANCE_THRESHOLD,
+            metric='cosine',
+            linkage='average'
+        )
+        
+        # Perform clustering
+        cluster_labels = clustering.fit_predict(embedding_matrix)
+        
+        return cluster_labels.tolist()
+    
+    def _cluster_embeddings(self, embeddings: List[np.ndarray], vad_segments: List[Dict[str, float]]) -> Dict[int, str]:
         """
         Cluster embeddings to assign speaker IDs.
         
-        TODO: Phase 2.3 implementation
-        - Cluster embeddings to identify distinct speakers
-        - Assign speaker IDs (SPEAKER_0, SPEAKER_1, ...) to each segment
-        - Return mapping: segment_index -> speaker_id
+        This method uses cluster_embeddings() and will map labels to speaker IDs.
+        Currently returns cluster labels as-is (implementation pending).
         
         Args:
             embeddings: List of embeddings (one per segment)
             vad_segments: List of VAD segments (for reference)
             
         Returns:
-            Dictionary mapping segment index to speaker_id
+            Dictionary mapping segment index to speaker_id (placeholder)
         """
-        # TODO: Implement clustering
-        pass
+        # Cluster embeddings using agglomerative clustering
+        cluster_labels = self.cluster_embeddings(embeddings)
+        
+        # TODO: Map cluster labels to speaker IDs (SPEAKER_0, SPEAKER_1, ...)
+        # For now, return placeholder mapping
+        # This will be implemented in next step
+        return {}
     
     def _group_segments_by_speaker(self, speaker_assignments: Dict[int, str], vad_segments: List[Dict[str, float]]) -> Dict[str, Any]:
         """
