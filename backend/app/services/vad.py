@@ -16,6 +16,7 @@ class VoiceActivityDetectionService:
     - Filter pipeline: Duration → Temporal modulation + Delta-sparsity → Voicing ratio
     - vad_segments.json is a stable internal contract
     - Output format: {"segments": [{"start": float, "end": float}, ...]}
+    - Output consumed by: Phase 2.3 (Diarization) - see diarization.py contract
     """
     
     # Frame duration in milliseconds (10, 20, or 30)
