@@ -11,6 +11,11 @@ class VoiceActivityDetectionService:
     Voice Activity Detection (VAD) service.
     Uses webrtcvad for conservative speech detection on normalized audio.
     Only processes normalized.wav (16kHz mono).
+    
+    Phase 2.2 LOCKED:
+    - Filter pipeline: Duration → Temporal modulation + Delta-sparsity → Voicing ratio
+    - vad_segments.json is a stable internal contract
+    - Output format: {"segments": [{"start": float, "end": float}, ...]}
     """
     
     # Frame duration in milliseconds (10, 20, or 30)
@@ -98,15 +103,6 @@ class VoiceActivityDetectionService:
                 normalized_samples = frame_samples.astype(np.float32) / 32768.0
                 # Compute RMS: sqrt(mean(samples^2))
                 rms_energy = np.sqrt(np.mean(normalized_samples ** 2))
-                
-                # Frame-level debug print
-                frame_duration = self.FRAME_DURATION_MS / 1000.0
-                print(
-                    "FRAME",
-                    "t=", round(i * frame_duration, 3),
-                    "vad=", is_speech,
-                    "rms=", round(float(rms_energy), 6)
-                )
                 
                 # Track all frame decisions and energies for filtering
                 frame_decisions.append((frame_time, is_speech))
@@ -286,21 +282,6 @@ class VoiceActivityDetectionService:
                 modulation_mean = 0.0
                 relative_modulation = 0.0
                 high_delta_ratio = 0.0
-            
-            # Segment-level debug print
-            print(
-                "DEBUG VAD SEGMENT",
-                "start=", round(segment_start, 3),
-                "end=", round(segment_end, 3),
-                "frames=", total_frames,
-                "voiced_frames=", voiced_frames,
-                "voiced_ratio=", round(voicing_density, 3),
-                "energy_mean=", round(float(energy_mean), 6),
-                "energy_std=", round(float(energy_std), 6),
-                "modulation_mean=", round(float(modulation_mean), 6),
-                "relative_modulation=", round(float(relative_modulation), 6),
-                "high_delta_ratio=", round(float(high_delta_ratio), 6),
-            )
             
             # Keep segment only if voicing density >= threshold
             if voicing_density >= self.MIN_VOICING_DENSITY:
