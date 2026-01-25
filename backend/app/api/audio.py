@@ -1,8 +1,7 @@
 from fastapi import APIRouter, UploadFile, File, HTTPException
 from pathlib import Path
 from app.models.audio import AudioUploadResponse
-from app.services.audio_normalization import AudioNormalizationService
-from app.services.vad import VoiceActivityDetectionService
+from app.services.session_pipeline import process_session
 
 router = APIRouter()
 
@@ -16,7 +15,8 @@ async def upload_audio(session_id: str, file: UploadFile = File(...)):
     """
     Upload audio file for a session.
     Saves the file to storage/audio/ with session_id prefix.
-    Automatically normalizes audio and runs VAD after upload.
+    Triggers the full processing pipeline (normalization, transcription,
+    VAD, and diarization) for the session.
     """
     # Validate session_id format (basic UUID check)
     if len(session_id) != 36:  # UUID format check
@@ -35,24 +35,14 @@ async def upload_audio(session_id: str, file: UploadFile = File(...)):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to save audio file: {str(e)}")
     
-    # Normalize audio after upload
-    normalization_service = AudioNormalizationService()
-    normalized_path = normalization_service.normalize_audio(session_id, file_path)
-    
-    # If normalization fails, still return accepted (graceful degradation)
-    # The error will be caught when transcription is attempted
-    if normalized_path is None:
-        # Normalization failed, but don't crash the upload
+    # Run the full session processing pipeline once per session
+    # (Normalization, transcription, VAD, diarization)
+    try:
+        process_session(session_id)
+    except Exception:
+        # Pipeline failures should not crash the upload endpoint
+        # Errors will surface during downstream verification
         pass
-    else:
-        # Run VAD on normalized audio (after normalization succeeds)
-        # VAD runs silently in background, doesn't affect upload response
-        vad_service = VoiceActivityDetectionService()
-        try:
-            vad_service.process_normalized_audio(session_id, normalized_path)
-        except Exception:
-            # VAD failure is silent - doesn't affect upload or transcription
-            pass
     
     return AudioUploadResponse(status="accepted")
 
