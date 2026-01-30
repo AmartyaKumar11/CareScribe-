@@ -105,6 +105,15 @@ import json
 import numpy as np
 import wave
 import torch
+
+# Monkey patch for torchaudio compatibility with speechbrain
+import torchaudio
+if not hasattr(torchaudio, 'list_audio_backends'):
+    def _list_audio_backends():
+        """Compatibility shim for newer torchaudio versions."""
+        return ['soundfile']
+    torchaudio.list_audio_backends = _list_audio_backends
+
 from speechbrain.inference.speaker import EncoderClassifier
 from sklearn.cluster import AgglomerativeClustering
 

@@ -64,3 +64,69 @@ async def get_transcript(session_id: str):
     
     return transcript
 
+
+@router.get("/{session_id}/diarization")
+async def get_diarization(session_id: str):
+    """
+    Get speaker diarization results for a session.
+    
+    Returns speaker segments with speaker IDs (SPEAKER_0, SPEAKER_1, etc.)
+    showing which parts of the audio belong to which speaker.
+    
+    The diarization is automatically generated when audio is uploaded.
+    """
+    import json
+    
+    # Validate session_id format
+    if len(session_id) != 36:
+        raise HTTPException(status_code=400, detail="Invalid session_id format")
+    
+    # Check if diarization file exists
+    diarization_path = STORAGE_DIR / session_id / "diarization.json"
+    
+    if not diarization_path.exists():
+        raise HTTPException(
+            status_code=404, 
+            detail="Diarization not found. Please upload audio first or wait for processing to complete."
+        )
+    
+    # Load and return diarization data
+    try:
+        with open(diarization_path, 'r') as f:
+            diarization_data = json.load(f)
+        return diarization_data
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to load diarization: {str(e)}")
+
+
+@router.get("/{session_id}/vad")
+async def get_vad_segments(session_id: str):
+    """
+    Get Voice Activity Detection (VAD) segments for a session.
+    
+    Returns segments where speech was detected (non-silence regions).
+    This is useful for debugging and understanding the diarization input.
+    """
+    import json
+    
+    # Validate session_id format
+    if len(session_id) != 36:
+        raise HTTPException(status_code=400, detail="Invalid session_id format")
+    
+    # Check if VAD file exists
+    vad_path = STORAGE_DIR / session_id / "vad_segments.json"
+    
+    if not vad_path.exists():
+        raise HTTPException(
+            status_code=404, 
+            detail="VAD segments not found. Please upload audio first or wait for processing to complete."
+        )
+    
+    # Load and return VAD data
+    try:
+        with open(vad_path, 'r') as f:
+            vad_data = json.load(f)
+        return vad_data
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to load VAD segments: {str(e)}")
+
