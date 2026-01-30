@@ -188,6 +188,14 @@ class DiarizationService:
         if not speaker_assignments:
             return None
         
+        # Phase 2.3: Temporal turn-taking correction (post-clustering refinement)
+        # This deterministic step leverages conversational structure to improve
+        # speaker separation for very similar voices where embeddings alone are
+        # insufficient. Uses turn-taking patterns common in medical consultations.
+        speaker_assignments = self._apply_temporal_correction(
+            speaker_assignments, vad_segments, embeddings
+        )
+        
         # Group segments by speaker and format output
         diarization_data = self._group_segments_by_speaker(speaker_assignments, vad_segments)
         if not diarization_data:
@@ -427,6 +435,221 @@ class DiarizationService:
             speaker_assignments[segment_idx] = speaker_id
         
         return speaker_assignments
+    
+    def _compute_embedding_distance(self, emb1: np.ndarray, emb2: np.ndarray) -> float:
+        """
+        Compute cosine distance between two embeddings.
+        
+        Args:
+            emb1: First embedding (L2-normalized)
+            emb2: Second embedding (L2-normalized)
+            
+        Returns:
+            Cosine distance (1 - cosine_similarity)
+        """
+        # Handle zero vectors (failed embeddings)
+        if np.all(emb1 == 0) or np.all(emb2 == 0):
+            return 1.0  # Maximum distance for invalid embeddings
+        
+        # For L2-normalized vectors, cosine similarity = dot product
+        cosine_similarity = np.dot(emb1, emb2)
+        
+        # Cosine distance = 1 - cosine_similarity
+        cosine_distance = 1.0 - cosine_similarity
+        
+        return float(cosine_distance)
+    
+    def _force_split_on_turn_taking(
+        self,
+        speaker_assignments: Dict[int, str],
+        vad_segments: List[Dict[str, float]],
+        embeddings: List[np.ndarray]
+    ) -> Dict[int, str]:
+        """
+        Force speaker split when clustering detects only 1 speaker but temporal
+        pattern suggests turn-taking conversation (medical consultation scenario).
+        
+        This handles the extreme case where voices are SO similar that even
+        low clustering thresholds merge them, but conversational structure
+        (rapid alternation with gaps) reveals two speakers.
+        
+        Strategy: Use embedding distances + temporal gaps to group segments into
+        utterances, then assign alternating speakers to utterance groups.
+        
+        Args:
+            speaker_assignments: Dict mapping segment_idx -> speaker_id (all same)
+            vad_segments: List of VAD segments (chronologically ordered)
+            embeddings: List of embeddings (aligned with segments)
+            
+        Returns:
+            Updated speaker_assignments with forced split if warranted
+        """
+        if len(vad_segments) < 3:
+            return speaker_assignments  # Need at least 3 segments for split
+        
+        # Step 1: Compute embedding distances between adjacent segments
+        # This helps identify if consecutive segments are likely same speaker
+        adjacent_distances = []
+        for i in range(1, len(vad_segments)):
+            distance = self._compute_embedding_distance(embeddings[i-1], embeddings[i])
+            gap = vad_segments[i]["start"] - vad_segments[i-1]["end"]
+            adjacent_distances.append((i, distance, gap))
+        
+        # Step 2: Identify speaker change points using embedding distance + gap
+        # Look for points where BOTH distance is high AND gap is reasonable
+        
+        # Calculate median distance to set threshold
+        distances_only = [d for _, d, _ in adjacent_distances]
+        median_distance = np.median(distances_only) if distances_only else 0.0
+        
+        # Find all potential turn boundaries
+        turn_points = []
+        for idx, distance, gap in adjacent_distances:
+            # Criteria: distance above median AND gap suggests speaker change
+            if distance > median_distance and gap > 0.4:
+                turn_points.append((idx, distance, gap))
+        
+        if len(turn_points) < 2:
+            return speaker_assignments  # Need at least 2 turn points for A-B-A pattern
+        
+        # Sort turn points by position (chronological)
+        turn_points.sort(key=lambda x: x[0])
+        
+        # Step 3: Assign speakers with alternation
+        # Segments are grouped by turn points, alternating between SPEAKER_0 and SPEAKER_1
+        corrected_assignments = {}
+        current_speaker = "SPEAKER_0"
+        turn_indices = [tp[0] for tp in turn_points]
+        
+        for i in range(len(vad_segments)):
+            # Check if this is a turn point
+            if i in turn_indices:
+                # Toggle speaker
+                current_speaker = "SPEAKER_1" if current_speaker == "SPEAKER_0" else "SPEAKER_0"
+            
+            corrected_assignments[i] = current_speaker
+        
+        return corrected_assignments
+    
+    def _apply_temporal_correction(
+        self, 
+        speaker_assignments: Dict[int, str], 
+        vad_segments: List[Dict[str, float]],
+        embeddings: List[np.ndarray]
+    ) -> Dict[int, str]:
+        """
+        Apply temporal turn-taking correction to improve similar-voice separation.
+        
+        This post-clustering step detects unnatural same-speaker adjacency patterns
+        (two long segments with the same speaker label and minimal gap) that are
+        unlikely in polite doctor-patient conversations with turn-taking.
+        
+        When such violations are detected, the second segment is reassigned to
+        the next-best alternative cluster based on embedding distance.
+        
+        Phase 2.3 LOCKED: This is deterministic post-processing that leverages
+        conversational structure without changing the core clustering.
+        
+        Args:
+            speaker_assignments: Dict mapping segment_idx -> speaker_id
+            vad_segments: List of VAD segments (chronologically ordered)
+            embeddings: List of embeddings (aligned with segments)
+            
+        Returns:
+            Updated speaker_assignments dict with temporal corrections applied
+        """
+        # Safety: Need at least 2 segments for correction
+        if len(vad_segments) < 2:
+            return speaker_assignments
+        
+        unique_speakers = set(speaker_assignments.values())
+        
+        # Only apply temporal correction if clustering detected 2+ speakers
+        # This refinement improves boundary accuracy for similar voices
+        if len(unique_speakers) < 2:
+            return speaker_assignments
+        
+        # Create mutable copy for corrections
+        corrected_assignments = speaker_assignments.copy()
+        
+        # Create reverse mapping: speaker_id -> cluster_label (for distance lookups)
+        # We need to recover the original cluster labels from speaker_ids
+        speaker_to_label = {}
+        for segment_idx, speaker_id in speaker_assignments.items():
+            if speaker_id not in speaker_to_label:
+                # Extract numeric label from "SPEAKER_N" format
+                label = int(speaker_id.split("_")[1])
+                speaker_to_label[speaker_id] = label
+        
+        # Process segments in chronological order (already ordered by VAD)
+        for i in range(1, len(vad_segments)):
+            prev_segment = vad_segments[i - 1]
+            curr_segment = vad_segments[i]
+            
+            prev_speaker = corrected_assignments[i - 1]
+            curr_speaker = corrected_assignments[i]
+            
+            # Step 2: Detect turn-taking violation
+            # Violation = same speaker + short gap + both long segments + multiple speakers
+            
+            # Condition 1: Same cluster label
+            if prev_speaker != curr_speaker:
+                continue  # No violation - different speakers (natural turn-taking)
+            
+            # Condition 2: Time gap < 300ms
+            gap = curr_segment["start"] - prev_segment["end"]
+            if gap >= 0.3:
+                continue  # Sufficient gap - natural pause
+            
+            # Condition 3: Both segments > 1.0 second
+            prev_duration = prev_segment["end"] - prev_segment["start"]
+            curr_duration = curr_segment["end"] - curr_segment["start"]
+            if prev_duration < 1.0 or curr_duration < 1.0:
+                continue  # Short segments - may be interjections
+            
+            # Condition 4: Multiple speakers exist
+            if len(unique_speakers) < 2:
+                continue  # Only one speaker - nothing to reassign
+            
+            # VIOLATION DETECTED: Unlikely same-speaker pattern
+            # Step 3: Apply forced alternation correction
+            
+            # Compute distances from current segment to all cluster centroids
+            curr_embedding = embeddings[i]
+            
+            # Find alternative speakers and their distances
+            alternatives = []
+            for alt_speaker in unique_speakers:
+                if alt_speaker == curr_speaker:
+                    continue  # Skip current assignment
+                
+                # Find a representative segment for this alternative speaker
+                # Use the first segment assigned to this speaker
+                for seg_idx, spk_id in corrected_assignments.items():
+                    if spk_id == alt_speaker:
+                        alt_embedding = embeddings[seg_idx]
+                        distance = self._compute_embedding_distance(curr_embedding, alt_embedding)
+                        alternatives.append((distance, alt_speaker))
+                        break  # Use first occurrence as representative
+            
+            if not alternatives:
+                continue  # No alternatives found (safety check)
+            
+            # Step 3: Choose alternative with lowest distance
+            alternatives.sort(key=lambda x: x[0])  # Sort by distance
+            best_distance, best_alternative = alternatives[0]
+            
+            # Step 4: Safety guardrails
+            # - Never create new speaker ID (checked - using existing)
+            # - Never change non-adjacent segments (checked - loop structure)
+            # - Never modify timestamps (checked - not touching vad_segments)
+            # - Never change total speaker count (checked - reusing existing IDs)
+            # - Never touch segments < 0.5s (checked - condition 3 requires > 1.0s)
+            
+            # Apply correction
+            corrected_assignments[i] = best_alternative
+        
+        return corrected_assignments
     
     def _group_segments_by_speaker(self, speaker_assignments: Dict[int, str], vad_segments: List[Dict[str, float]]) -> Dict[str, Any]:
         """
