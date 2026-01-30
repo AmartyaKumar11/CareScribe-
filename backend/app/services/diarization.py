@@ -137,7 +137,7 @@ class DiarizationService:
     # - 0.35-0.40: Lenient (groups similar voices, may under-segment)
     #
     # For similar-sounding speakers (e.g., same gender, age), use lower values (0.15-0.20)
-    CLUSTERING_DISTANCE_THRESHOLD = 0.2  # Adjusted for better speaker separation
+    CLUSTERING_DISTANCE_THRESHOLD = 0.15  # Adjusted for better speaker separation
     
     def __init__(self):
         """Initialize diarization service."""
