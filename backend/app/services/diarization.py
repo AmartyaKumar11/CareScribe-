@@ -105,15 +105,6 @@ import json
 import numpy as np
 import wave
 import torch
-
-# Monkey patch for torchaudio compatibility with speechbrain
-import torchaudio
-if not hasattr(torchaudio, 'list_audio_backends'):
-    def _list_audio_backends():
-        """Compatibility shim for newer torchaudio versions."""
-        return ['soundfile']
-    torchaudio.list_audio_backends = _list_audio_backends
-
 from speechbrain.inference.speaker import EncoderClassifier
 from sklearn.cluster import AgglomerativeClustering
 
@@ -138,18 +129,30 @@ class DiarizationService:
     
     # Clustering distance threshold (cosine distance for stopping clustering)
     # Lower values = more clusters (stricter similarity requirement)
-    CLUSTERING_DISTANCE_THRESHOLD = 0.3
+    # Higher values = fewer clusters (more lenient grouping)
+    # 
+    # Recommended values:
+    # - 0.15-0.20: Very strict (detects subtle differences, may over-segment)
+    # - 0.25-0.30: Moderate (balanced, good for distinct voices)
+    # - 0.35-0.40: Lenient (groups similar voices, may under-segment)
+    #
+    # For similar-sounding speakers (e.g., same gender, age), use lower values (0.15-0.20)
+    CLUSTERING_DISTANCE_THRESHOLD = 0.2  # Adjusted for better speaker separation
     
     def __init__(self):
         """Initialize diarization service."""
         self.storage_dir = Path(__file__).parent.parent / "storage" / "audio"
         # Initialize ECAPA-TDNN speaker embedding model (CPU-only)
         try:
+            from speechbrain.utils.fetching import LocalStrategy
             self.embedding_model = EncoderClassifier.from_hparams(
                 source="speechbrain/spkrec-ecapa-voxceleb",
-                run_opts={"device": "cpu"}
+                run_opts={"device": "cpu"},
+                savedir=Path(__file__).parent.parent / "pretrained_models" / "spkrec-ecapa-voxceleb",
+                local_strategy=LocalStrategy.COPY  # Use COPY instead of SYMLINK for Windows
             )
-        except Exception:
+        except Exception as e:
+            print(f"Failed to load diarization model: {e}")
             self.embedding_model = None
     
     def run(self, session_id: str) -> Optional[Path]:
@@ -361,6 +364,19 @@ class DiarizationService:
         # Convert embeddings list to numpy array for clustering
         embedding_matrix = np.vstack(embeddings)
         
+        # Filter out zero vectors (failed embeddings) and track their indices
+        non_zero_mask = np.any(embedding_matrix != 0, axis=1)
+        non_zero_indices = np.where(non_zero_mask)[0]
+        non_zero_embeddings = embedding_matrix[non_zero_mask]
+        
+        # If all embeddings are zero or only one non-zero embedding, assign all to same cluster
+        if len(non_zero_embeddings) == 0:
+            return [0] * len(embeddings)
+        
+        if len(non_zero_embeddings) == 1:
+            # Single valid embedding = single cluster for all
+            return [0] * len(embeddings)
+        
         # Agglomerative clustering with cosine distance and average linkage
         clustering = AgglomerativeClustering(
             n_clusters=None,  # Use distance threshold instead
@@ -369,8 +385,12 @@ class DiarizationService:
             linkage='average'
         )
         
-        # Perform clustering
-        cluster_labels = clustering.fit_predict(embedding_matrix)
+        # Perform clustering on non-zero embeddings
+        non_zero_labels = clustering.fit_predict(non_zero_embeddings)
+        
+        # Map back to original indices (zero embeddings get assigned to cluster 0)
+        cluster_labels = np.zeros(len(embeddings), dtype=int)
+        cluster_labels[non_zero_indices] = non_zero_labels
         
         return cluster_labels.tolist()
     

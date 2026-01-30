@@ -17,6 +17,12 @@ backend/app/storage/audio/*
 !backend/app/storage/audio/.gitkeep
 
 # =========================
+# Pretrained ML models
+# =========================
+backend/pretrained_models/
+backend/app/pretrained_models/
+
+# =========================
 # OS / Editor junk
 # =========================
 .DS_Store

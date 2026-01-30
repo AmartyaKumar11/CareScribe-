@@ -1,5 +1,15 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+
+# Monkey patch for torchaudio compatibility with speechbrain
+# Must be done BEFORE importing any speechbrain modules
+import torchaudio
+if not hasattr(torchaudio, 'list_audio_backends'):
+    def _list_audio_backends():
+        """Compatibility shim for newer torchaudio versions."""
+        return ['soundfile']
+    torchaudio.list_audio_backends = _list_audio_backends
+
 from app.api import sessions, audio
 
 app = FastAPI(title="CareScribe API", version="1.0.0")
